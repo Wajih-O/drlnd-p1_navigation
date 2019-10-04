@@ -14,10 +14,10 @@ import torch.nn as nn
 DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 
-class QNetwork(nn.Module):
+class QFCNet(nn.Module):
     """Actor (Policy) Model. 2x(FC hidden layer + Relu activation) + FC"""
 
-    def __init__(self, state_size: int, action_size: int, seed: int, fc1_units: int = 64,
+    def __init__(self, state_size: int, action_size: int, seed: int = 0, fc1_units: int = 64,
                  fc2_units: int = 64):
         """Initialize parameters and build model.
 
@@ -27,7 +27,7 @@ class QNetwork(nn.Module):
         :param fc1_units: Number of nodes in first hidden layer
         :param fc2_units: Number of nodes in second hidden layer
         """
-        super(QNetwork, self).__init__()
+        super(QFCNet, self).__init__()
         self.seed = torch.manual_seed(seed)
         self.fc1 = nn.Linear(state_size, fc1_units)
         self.fc2 = nn.Linear(fc1_units, fc2_units)
@@ -37,17 +37,75 @@ class QNetwork(nn.Module):
         """Build a network that maps state -> action values."""
         return self.fc3(F.relu(self.fc2(F.relu(self.fc1(state)))))
 
+    def action_size(self):
+        return self.fc3.out_features
 
-class DQNAgent():
+
+class QConvNet(nn.Module):
+    """ A convolutional network """
+
+    def __init__(self, action_size, seed: int = 0):
+        super(QConvNet, self).__init__()
+        self.seed = torch.manual_seed(seed)
+        # Conv. layers
+        self.conv_1 = nn.Conv2d(1, 32, 9, stride=4, padding=4)
+        self.conv_2 = nn.Conv2d(32, 64, 5, stride=3, padding=1)
+
+        # Fully connected layers
+        self.fc_layers_params = [(64 * 7 * 7, 256), (256, action_size)]
+        self.fc1 = nn.Linear(*self.fc_layers_params[0])
+        self.fc2 = nn.Linear(*self.fc_layers_params[1])
+
+    def forward(self, state):
+        """ forward ..."""
+        # Applying Conv. section
+        output = F.relu(self.conv_2(F.relu(self.conv_1(state))))
+        # flatten the output and relay to the FC part
+        output = output.view(-1, self.fc_layers_params[0][0])
+        return self.fc2(F.relu(self.fc1(output)))
+
+    def action_size(self):
+        return self.fc2.out_features
+
+
+class QNetFactory:
+    """ Abstract factory"""
+
+
+class QFCNetFactory(QNetFactory):
+    """ Fully connected arch. Neural Net factory."""
+
+    def __init__(self, state_size, action_size, seed: int = 0):
+        self.state_size = state_size
+        self.action_size = action_size
+        self.seed = seed
+
+    def build(self):
+        """ build an FC based network """
+        return QFCNet(self.state_size, self.action_size, self.seed).to(DEVICE)
+
+
+class QConvNetFactory(QNetFactory):
+    """ Fully connected arch. Neural Net factory."""
+
+    def __init__(self, action_size, seed: int = 0):
+        self.action_size = action_size
+        self.seed = seed
+
+    def build(self):
+        """ build an FC based network """
+        return QConvNet(self.action_size, self.seed).to(DEVICE)
+
+
+class DQNAgent:
     """Interacts with and learns from the environment."""
 
-    def __init__(self, state_size: int, action_size: int, seed: int = 0, batch_size: int = 64,
+    def __init__(self, network_factory: QNetFactory, seed: int = 0, batch_size: int = 64,
                  step_to_update: int = 5, buffer_size: int = int(1e5), gamma: float = .99,
                  lr: float = 5e-4, tau: float = 1e-3, episodes_window_size: int = 100):
         """Initialize an Agent object.
 
-        :param state_size: dimension of each state
-        :param action_size: dimension of each action
+
         :param seed: initializes pseudo random gen. random.seed(seed)
         :param batch_size: training batch_size
         :param step_to_update: after which the local network is trained/and the target is updated
@@ -57,20 +115,20 @@ class DQNAgent():
         :param tau: Q soft update tau
         :param episodes_window_size: deque storing the [episodes_window_size] last episodes score
         """
-        self.state_size = state_size
-        self.action_size = action_size
         random.seed(seed)
 
         # Q-Network
         self.batch_size = batch_size  # initialize learning batch size
-        self.qnetwork_local = QNetwork(state_size, action_size, seed).to(DEVICE)
-        self.qnetwork_target = QNetwork(state_size, action_size, seed).to(DEVICE)
+        self.qnetwork_local = network_factory.build()
+        self.qnetwork_target = network_factory.build()
+        self.action_size = self.qnetwork_local.action_size()
+
         self.optimizer = optim.Adam(self.qnetwork_local.parameters(), lr=lr)
         self.gamma = gamma
         self.tau = tau
 
         # Replay memory
-        self.memory = ReplayBuffer(action_size, buffer_size, batch_size, seed)
+        self.memory = ReplayBuffer(self.action_size, buffer_size, batch_size, seed)
 
         # Initialize time step (for updating every self.steps_to_update steps)
         self.t_step = 0
@@ -85,9 +143,23 @@ class DQNAgent():
         """ gets the current reply buffer size"""
         return len(self.memory)
 
-    def explore(self, env, n_episodes=1800, max_t=1000, brain_name=None,
+    def explore(self, env, extract_state, n_episodes=1800, max_t=1000, brain_name=None,
                 eps_start=1.0, eps_end=0.01, eps_decay=0.99):
-        """ explore/solve the env"""
+        """ Explore/solve the env
+
+        :param env: the environment to solve
+        :param extract_state: state extractor function (env-info->state [np.ndarray])
+        :param n_episodes: the max number of exploration episodes (the env expected to be solve before)
+        :param max_t: maximum number of steps/actions with in an episode (if termination is not reached)
+        :param brain_name: unity env brain_name
+        :param eps_start: initial epsilon for epsilon-greedy sampling
+        :param eps_end: minimum epsilon for epsilon-greedy sampling
+        :param eps_decay: epsilon decay (epsilon = max(eps_end, eps_decay * epsilon) )
+
+        """
+
+        # TODO: A small agent/env compatibility sanity check for the env.
+        # Choose the first env brain name as default if not specified
         brain_name_ = brain_name
         if brain_name_ is None:
             brain_name_ = env.brain_names[0]
@@ -96,14 +168,14 @@ class DQNAgent():
 
         for i_episode in range(1, n_episodes + 1):
             score = 0
-            env_info = env.reset(train_mode=True)[brain_name_]  # reset the environment
-            state = env_info.vector_observations[0]
+            # reset the environment and get initial state
+            state = extract_state(env.reset(train_mode=True)[brain_name_])
 
             for _ in range(max_t):
                 action = self.get_eps_greedy_action(state, eps)  # pick action (epsilon-greedy way)
 
                 env_info = env.step(action)[brain_name_]  # send the action to the environment
-                next_state = env_info.vector_observations[0]  # get the next state
+                next_state = extract_state(env_info)
                 reward = env_info.rewards[0]  # get the reward
                 done = env_info.local_done[0]  # see if episode has finished
                 score += reward  # update the score
@@ -226,13 +298,13 @@ class ReplayBuffer:
         experiences = random.sample(self.memory, k=self.batch_size)
 
         states = torch.from_numpy(
-            np.vstack([e.state for e in experiences if e is not None])).float().to(DEVICE)
+            np.array([e.state for e in experiences if e is not None])).float().to(DEVICE)
         actions = torch.from_numpy(
             np.vstack([e.action for e in experiences if e is not None])).long().to(DEVICE)
         rewards = torch.from_numpy(
             np.vstack([e.reward for e in experiences if e is not None])).float().to(DEVICE)
         next_states = torch.from_numpy(
-            np.vstack([e.next_state for e in experiences if e is not None])).float().to(DEVICE)
+            np.array([e.next_state for e in experiences if e is not None])).float().to(DEVICE)
         dones = torch.from_numpy(
             np.vstack([e.done for e in experiences if e is not None]).astype(np.uint8)).float().to(
             DEVICE)
