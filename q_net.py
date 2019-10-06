@@ -31,12 +31,12 @@ class QFCNet(nn.Module):
 
 
 class QConvNet(nn.Module):
-    """ A convolutional network """
+    """ A convolutional network for Pixel input (gray-scaled/Or channel selected)"""
 
     def __init__(self, action_size, seed: int = 0):
         super(QConvNet, self).__init__()
         self.seed = torch.manual_seed(seed)
-        # Conv. layers
+        # Conv. layers : conv_1 layer supports gray-scaled transformed or a selected channel
         self.conv_1 = nn.Conv2d(1, 32, 9, stride=4, padding=4)
         self.conv_2 = nn.Conv2d(32, 64, 5, stride=3, padding=1)
 

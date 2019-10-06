@@ -1,8 +1,9 @@
 """ DQN Based Agent for Banana collector env."""
 
+import sys
 import random
-from typing import Tuple
-from collections import namedtuple, deque
+from typing import Tuple, List
+from collections import deque
 
 import numpy as np
 
@@ -12,6 +13,8 @@ import torch.optim as optim
 import torch.nn as nn
 
 from q_net import QNetFactory
+from replay_buffer import Experience, BaseReplayBufferFactory
+
 
 DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
@@ -19,7 +22,8 @@ DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 class DQNAgent:
     """Interacts with and learns from the environment."""
 
-    def __init__(self, network_factory: QNetFactory, seed: int = 0, batch_size: int = 64,
+    def __init__(self, network_factory: QNetFactory, replay_buffer_factory: BaseReplayBufferFactory,
+                 seed: int = 0, batch_size: int = 64,
                  step_to_update: int = 5, buffer_size: int = int(1e5), gamma: float = .99,
                  lr: float = 5e-4, tau: float = 1e-3, episodes_window_size: int = 100):
         """Initialize an Agent object.
@@ -47,7 +51,7 @@ class DQNAgent:
         self.tau = tau
 
         # Replay memory
-        self.memory = ReplayBuffer(self.action_size, buffer_size, batch_size, seed)
+        self.memory = replay_buffer_factory.build(buffer_size, batch_size, seed)
 
         # Initialize time step (for updating every self.steps_to_update steps)
         self.t_step = 0
@@ -121,10 +125,22 @@ class DQNAgent:
                 torch.save(self.qnetwork_local.state_dict(), 'checkpoint.pth')
                 break
 
+    def target_local_abs_error(self, state, action: int,
+                               error_eps: float = 2 * sys.float_info.epsilon) -> float:
+        """ A helper to compute the squared error [q_local(s,a)- q_target(s,a)]^2"""
+        state = torch.from_numpy(state).float().unsqueeze(0).to(DEVICE)
+        self.qnetwork_local.eval()  # evaluation mode (equivalent to train(False))
+        with torch.no_grad():
+            error = np.abs(self.qnetwork_local(state).cpu().data.numpy()[0][action] -
+                           self.qnetwork_target(state).cpu().data.numpy()[0][action])
+        self.qnetwork_local.train()  # reset the training mode to true
+        return error + error_eps
+
     def step(self, state, action, reward, next_state, done):
         """ Update the replay buffer and eventually train (each self.steps_to_update)"""
         self.memory.add(state, action, reward, next_state,
-                        done)  # update replay buffer with the exp.
+                        done, self.target_local_abs_error(state,
+                                                          action))  # update replay buffer with the exp.
         # Learn every self.steps_to_update steps.
         self.t_step = (self.t_step + 1) % self.steps_to_update
         if self.t_step == 0:
@@ -140,10 +156,10 @@ class DQNAgent:
         :return : action index as int
         """
         state = torch.from_numpy(state).float().unsqueeze(0).to(DEVICE)
-        self.qnetwork_local.eval()
+        self.qnetwork_local.eval()  # evaluation mode (equivalent to train(False))
         with torch.no_grad():
             action_values = self.qnetwork_local(state)
-        self.qnetwork_local.train()
+        self.qnetwork_local.train()  # reset the training mode to true
 
         # Epsilon-greedy action selection
         if random.random() > eps:
@@ -151,12 +167,28 @@ class DQNAgent:
 
         return random.choice(np.arange(self.action_size))
 
-    def learn(self, experiences: Tuple[torch.Tensor]):
+    @staticmethod
+    def to_tensors(experiences: List[Experience]) -> Tuple[torch.Tensor]:
+        """ Transforms a batch of experiences to tensors for  training/learning"""
+        states = torch.from_numpy(
+            np.array([e.state for e in experiences])).float().to(DEVICE)
+        actions = torch.from_numpy(
+            np.vstack([e.action for e in experiences])).long().to(DEVICE)
+        rewards = torch.from_numpy(
+            np.vstack([e.reward for e in experiences])).float().to(DEVICE)
+        next_states = torch.from_numpy(
+            np.array([e.next_state for e in experiences])).float().to(DEVICE)
+        dones = torch.from_numpy(
+            np.vstack([e.done for e in experiences]).astype(np.uint8)).float().to(
+            DEVICE)
+        return states, actions, rewards, next_states, dones
+
+    def learn(self, experiences: List[Experience]):
         """Update value parameters using given batch of experience tuples.
 
         :param experiences: tuple of (s, a, r, s', done) tuples
         """
-        states, actions, rewards, next_states, dones = experiences
+        states, actions, rewards, next_states, dones = DQNAgent.to_tensors(experiences)
 
         # Get max predicted Q values (for next states) from target model
         q_targets_next = self.qnetwork_target(next_states).detach().max(1)[0].unsqueeze(1)
@@ -176,6 +208,12 @@ class DQNAgent:
         # soft-update target network
         DQNAgent.soft_update(self.qnetwork_local, self.qnetwork_target, self.tau)
 
+        # Replace experiences if the m
+        self.memory.replace([Experience(experience.state, experience.action, experience.reward,
+                                        experience.next_state, experience.done, error) for experience, error in
+                             zip(experiences, np.abs(
+                                 q_expected.detach().squeeze().numpy() - q_targets.detach().squeeze().numpy()))])
+
     @staticmethod
     def soft_update(local_model: nn.Module, target_model: nn.Module, tau: float):
         """Soft update model parameters.
@@ -189,46 +227,4 @@ class DQNAgent:
             target_param.data.copy_(tau * local_param.data + (1.0 - tau) * target_param.data)
 
 
-class ReplayBuffer:
-    """Fixed-size buffer to store experience tuples."""
 
-    def __init__(self, action_size: int, buffer_size: int, batch_size: int, seed: int):
-        """Initialize a ReplayBuffer object.
-
-        : param action_size: dimension of each action
-        : param buffer_size: maximum size of buffer
-        : param batch_size: size of each training batch
-        : param seed: random seed
-        """
-        self.action_size = action_size
-        self.memory = deque(maxlen=buffer_size)
-        self.batch_size = batch_size
-        self.experience = namedtuple("Experience",
-                                     field_names=["state", "action", "reward", "next_state",
-                                                  "done"])
-        random.seed(seed)
-
-    def add(self, state, action, reward, next_state, done):
-        """Add a new experience to memory."""
-        self.memory.append(self.experience(state, action, reward, next_state, done))
-
-    def sample(self):
-        """Randomly sample a batch of experiences from memory."""
-        experiences = random.sample(self.memory, k=self.batch_size)
-
-        states = torch.from_numpy(
-            np.array([e.state for e in experiences if e is not None])).float().to(DEVICE)
-        actions = torch.from_numpy(
-            np.vstack([e.action for e in experiences if e is not None])).long().to(DEVICE)
-        rewards = torch.from_numpy(
-            np.vstack([e.reward for e in experiences if e is not None])).float().to(DEVICE)
-        next_states = torch.from_numpy(
-            np.array([e.next_state for e in experiences if e is not None])).float().to(DEVICE)
-        dones = torch.from_numpy(
-            np.vstack([e.done for e in experiences if e is not None]).astype(np.uint8)).float().to(
-            DEVICE)
-        return states, actions, rewards, next_states, dones
-
-    def __len__(self):
-        """Return the current size of internal memory."""
-        return len(self.memory)
