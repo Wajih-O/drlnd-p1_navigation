@@ -2,6 +2,7 @@
 
 import sys
 import random
+import string
 from typing import Tuple, List
 from collections import deque
 
@@ -15,7 +16,6 @@ import torch.nn as nn
 from q_net import QNetFactory
 from replay_buffer import Experience, BaseReplayBufferFactory
 
-
 DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 
@@ -25,7 +25,7 @@ class DQNAgent:
     def __init__(self, network_factory: QNetFactory, replay_buffer_factory: BaseReplayBufferFactory,
                  seed: int = 0, batch_size: int = 64,
                  step_to_update: int = 5, buffer_size: int = int(1e5), gamma: float = .99,
-                 lr: float = 5e-4, tau: float = 1e-3, episodes_window_size: int = 100):
+                 lr: float = 5e-4, tau: float = 1e-3, episodes_window_size: int = 100, name=None):
         """Initialize an Agent object.
 
 
@@ -39,6 +39,9 @@ class DQNAgent:
         :param episodes_window_size: deque storing the [episodes_window_size] last episodes score
         """
         random.seed(seed)
+
+        self._name = name if name is not None else ''.join(
+            random.choice(string.ascii_letters) for _ in range(8))
 
         # Q-Network
         self.batch_size = batch_size  # initialize learning batch size
@@ -62,6 +65,10 @@ class DQNAgent:
         self.scores_window = deque(maxlen=episodes_window_size)
 
     @property
+    def name(self):
+        return self._name
+
+    @property
     def buffer_size(self):
         """ gets the current reply buffer size"""
         return len(self.memory)
@@ -81,7 +88,7 @@ class DQNAgent:
 
         """
 
-        # TODO: A small agent/env compatibility sanity check for the env.
+        # TODO: A small agent/env compatibility sanity check.
         # Choose the first env brain name as default if not specified
         brain_name_ = brain_name
         if brain_name_ is None:
@@ -122,8 +129,12 @@ class DQNAgent:
                 print('\nEnvironment solved in {:d} episodes!\tAverage Score: {:.2f}'.format(
                     i_episode, np.mean(
                         self.scores_window)))
-                torch.save(self.qnetwork_local.state_dict(), 'checkpoint.pth')
+                self.save()
                 break
+
+    def save(self):
+        """ save local qnetwork_local as state_dict"""
+        torch.save(self.qnetwork_local.state_dict(), '{}.chpnt.pth'.format(self._name))
 
     def target_local_abs_error(self, state, action: int,
                                error_eps: float = 2 * sys.float_info.epsilon) -> float:
@@ -208,12 +219,6 @@ class DQNAgent:
         # soft-update target network
         DQNAgent.soft_update(self.qnetwork_local, self.qnetwork_target, self.tau)
 
-        # Replace experiences if the m
-        self.memory.replace([Experience(experience.state, experience.action, experience.reward,
-                                        experience.next_state, experience.done, error) for experience, error in
-                             zip(experiences, np.abs(
-                                 q_expected.detach().squeeze().numpy() - q_targets.detach().squeeze().numpy()))])
-
     @staticmethod
     def soft_update(local_model: nn.Module, target_model: nn.Module, tau: float):
         """Soft update model parameters.
@@ -225,6 +230,3 @@ class DQNAgent:
         """
         for target_param, local_param in zip(target_model.parameters(), local_model.parameters()):
             target_param.data.copy_(tau * local_param.data + (1.0 - tau) * target_param.data)
-
-
-
